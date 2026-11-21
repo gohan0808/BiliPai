@@ -2,6 +2,8 @@ name: Build
 
 on:
   push:
+  release:
+    types: [published] # 当你在网页上创建并发布 Release 时自动触发
   workflow_dispatch:
     inputs:
       build_type:
@@ -51,6 +53,7 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "build_type=${{ github.event.inputs.build_type }}" >> $GITHUB_OUTPUT
           else
+            # push 或发布 release 时一律编译正式签名版
             echo "build_type=release" >> $GITHUB_OUTPUT
           fi
           echo "构建类型已设置"
@@ -72,7 +75,7 @@ jobs:
       - name: Grant execute permission to gradlew
         run: chmod +x gradlew
 
-      # 仅在配置了 FCM Secret 时可选写入，未配置则直接跳过（不阻断构建）
+      # 仅在配置了 FCM Secret 时可选写入，未配置则直接跳过（已修复 secrets 表达式语法报错）
       - name: Set Up Optional FCM Config
         env:
           FCM: ${{ secrets.FCM }}
@@ -98,6 +101,7 @@ jobs:
   
       - name: Build APK
         env:
+          # GitHub Packages（Miuix SNAPSHOT）解析需要 token 鉴权
           GITHUB_TOKEN: ${{ github.token }}
           BILI_BUILD_COMMIT_SHA: ${{ github.sha }}
           BILI_BUILD_GIT_REF: ${{ github.ref }}
@@ -117,7 +121,6 @@ jobs:
             "-Pbili.build.releaseTag=${BILI_BUILD_RELEASE_TAG}"
           )
           if [ "${{ steps.set_build_type.outputs.build_type }}" = "release" ]; then
-            # 去掉了 -Pbili.firebase.uploadMapping=true，避免无 FCM 配置时 Firebase 上传报错
             ./gradlew "${COMMON_ARGS[@]}" assembleRelease
           else
             ./gradlew "${COMMON_ARGS[@]}" assembleDev
@@ -202,14 +205,14 @@ jobs:
 
       - name: Generate artifact attestation
         id: attest_release
-        if: env.GITHUB_APK_DISTRIBUTION_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') && steps.set_build_type.outputs.build_type == 'release'
+        if: env.GITHUB_APK_DISTRIBUTION_ENABLED == 'true' && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')) && steps.set_build_type.outputs.build_type == 'release'
         uses: actions/attest-build-provenance@v3
         with:
           subject-checksums: ${{ github.workspace }}/build/release-evidence/checksums.txt
           show-summary: true
 
       - name: Collect attestation evidence
-        if: env.GITHUB_APK_DISTRIBUTION_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') && steps.set_build_type.outputs.build_type == 'release'
+        if: env.GITHUB_APK_DISTRIBUTION_ENABLED == 'true' && (github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')) && steps.set_build_type.outputs.build_type == 'release'
         env:
           DIST_DIR: ${{ github.workspace }}/build/release-evidence
           ATTESTATION_URL: ${{ steps.attest_release.outputs.attestation-url }}
@@ -249,35 +252,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub Release Assets
-        if: env.GITHUB_APK_DISTRIBUTION_ENABLED == 'true' && startsWith(github.ref, 'refs/tags/v') && steps.set_build_type.outputs.build_type == 'release'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          DIST_DIR: ${{ github.workspace }}/build/release-evidence
-        run: |
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          tag = os.environ["RELEASE_TAG"]
-          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
-          heading = re.compile(r"^##\s+" + re.escape(tag) + r"(?:\s|$).*$", re.MULTILINE)
-          match = heading.search(changelog)
-          if not match:
-              raise SystemExit(f"No changelog entry found for {tag}")
-          next_heading = re.search(r"^##\s+", changelog[match.end():], re.MULTILINE)
-          end = match.end() + next_heading.start() if next_heading else len(changelog)
-          notes = changelog[match.end():end].strip()
-          if not notes:
-              raise SystemExit(f"Changelog entry for {tag} is empty")
-          Path(os.environ["RUNNER_TEMP"], "release-notes.md").write_text(notes + "\n", encoding="utf-8")
-          PY
-          gh release view "$RELEASE_TAG" --json isDraft >/dev/null 2>&1 || \
-            gh release create "$RELEASE_TAG" \
-              --draft \
-              --title "$RELEASE_TAG" \
-              --notes-file "$RUNNER_TEMP/release-notes.md"
-
-          gh release upload "$RELEASE_TAG" "$DIST_DIR"/* --clobber
-          gh release edit "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md" --draft=false
+        if: github.event_name == 'release' || (startsWith(github.ref, 'refs/tags/v') && steps.set_build_type.outputs.build_type == 'release')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/build/release-evidence/*
