@@ -74,10 +74,12 @@ jobs:
 
       # 仅在配置了 FCM Secret 时可选写入，未配置则直接跳过（不阻断构建）
       - name: Set Up Optional FCM Config
-        if: ${{ secrets.FCM != '' }}
+        env:
+          FCM: ${{ secrets.FCM }}
+        if: env.FCM != ''
         run: |
           cd ./app
-          echo "${{ secrets.FCM }}" | base64 -d > google-services.json
+          echo "$FCM" | base64 -d > google-services.json
 
       - name: Configure release signing
         if: steps.set_build_type.outputs.build_type == 'release'
